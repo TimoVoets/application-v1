@@ -1,9 +1,11 @@
 fastapi
-uvicorn[standard]
-pytesseract
-pdf2image
-pillow
-pyzbar
-PyPDF2
+uvicorn
 gunicorn
+PyPDF2
+pdf2image
+pytesseract
+Pillow
+opencv-python-headless
+pyzbar
+numpy
 python-multipart
