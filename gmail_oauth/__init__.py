@@ -210,6 +210,24 @@ def get_gmail_status(user_id: str):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": "Failed to get Gmail status", "detail": str(e)})
 
+@router.post("/oauth/gmail/settings")
+def update_gmail_settings(settings: GmailSettingsUpdate):
+    try:
+        update_data = {"subject_filter": settings.subject_filter}
+        query = (
+            supabase
+            .table("email_tokens")
+            .update(update_data)
+            .eq("user_id", settings.user_id)
+            .eq("provider", "gmail")
+        )
+        if settings.token_id:
+            query = query.eq("id", settings.token_id)
+        result = query.execute()
+        return {"updated": result.data}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": "Failed to update Gmail settings", "detail": str(e)})
+
 @router.get("/oauth/gmail/callback")
 def gmail_oauth_callback(code: str, state: str):
     try:
