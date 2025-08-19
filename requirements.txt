@@ -9,7 +9,9 @@ opencv-python-headless
 pyzbar
 numpy
 python-multipart
-requests
 supabase
 python-dotenv
 pydantic
+httpx
+pytest
+pytest-asyncio

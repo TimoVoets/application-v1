@@ -1,7 +1,8 @@
 from fastapi import APIRouter
 from fastapi.responses import RedirectResponse, JSONResponse, StreamingResponse
-import os, requests, datetime, time, re, base64, io, urllib.parse
-from supabase import create_client
+import os, datetime, time, re, base64, io, urllib.parse
+import httpx
+from supabase import create_async_client, AsyncClient
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import Optional, List, Dict
@@ -32,7 +33,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: AsyncClient = create_async_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ==== Models ====
 class OAuthInitiateRequest(BaseModel):
@@ -67,38 +68,40 @@ def _to_epoch_seconds(value) -> int:
 def _epoch_ms_to_iso_utc(ms: int) -> str:
     return datetime.datetime.utcfromtimestamp(ms/1000).replace(microsecond=0).isoformat() + "Z"
 
-def already_seen(user_id: str, msg_id: str) -> bool:
-    res = supabase.table("email_seen").select("message_id").eq("user_id", user_id).eq("message_id", msg_id).execute()
+async def already_seen(user_id: str, msg_id: str) -> bool:
+    res = await supabase.table("email_seen").select("message_id").eq("user_id", user_id).eq("message_id", msg_id).execute()
     return len(res.data) > 0
 
-def mark_seen(user_id: str, msg_id: str):
+async def mark_seen(user_id: str, msg_id: str):
     # Upsert voorkomt duplicates / race conditions
-    supabase.table("email_seen").upsert(
+    await supabase.table("email_seen").upsert(
         {"user_id": user_id, "message_id": msg_id},
         on_conflict="user_id,message_id"
     ).execute()
 
-def push_to_n8n(user_id: str, message: dict, provider: str):
+async def push_to_n8n(user_id: str, message: dict, provider: str):
     if not N8N_WEBHOOK_URL:
         return
     try:
-        requests.post(N8N_WEBHOOK_URL, json={"user_id": user_id, "provider": provider, "message": message}, timeout=20)
+        async with httpx.AsyncClient(timeout=20) as client:
+            await client.post(N8N_WEBHOOK_URL, json={"user_id": user_id, "provider": provider, "message": message})
     except Exception:
         pass
 
-def refresh_access_token_google(refresh_token: str) -> dict:
+async def refresh_access_token_google(refresh_token: str) -> dict:
     data = {
         "client_id": GOOGLE_CLIENT_ID,
         "client_secret": GOOGLE_CLIENT_SECRET,
         "refresh_token": refresh_token,
         "grant_type": "refresh_token",
     }
-    r = requests.post("https://oauth2.googleapis.com/token", data=data, timeout=20)
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post("https://oauth2.googleapis.com/token", data=data)
     if r.status_code >= 400:
         raise RuntimeError(f"google_refresh_http_{r.status_code}: {r.text}")
     return r.json()
 
-def refresh_access_token_ms(refresh_token: str) -> dict:
+async def refresh_access_token_ms(refresh_token: str) -> dict:
     data = {
         "client_id": MS_CLIENT_ID,
         "client_secret": MS_CLIENT_SECRET,
@@ -106,12 +109,13 @@ def refresh_access_token_ms(refresh_token: str) -> dict:
         "refresh_token": refresh_token,
         "redirect_uri": MS_REDIRECT_URI,
     }
-    r = requests.post(TOKEN_URL_MS, data=data, timeout=30)
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(TOKEN_URL_MS, data=data)
     if r.status_code >= 400:
         raise RuntimeError(f"ms_refresh_http_{r.status_code}: {r.text}")
     return r.json()
 
-def get_valid_token(row):
+async def get_valid_token(row):
     """
     Geef een bruikbare access_token terug. Probeer te refreshen als bijna verlopen.
     Als refreshen faalt (bv. invalid_grant 400), raise RuntimeError zodat caller kan skippen.
@@ -131,9 +135,9 @@ def get_valid_token(row):
 
     try:
         if provider == "gmail":
-            new = refresh_access_token_google(rt)
+            new = await refresh_access_token_google(rt)
         else:
-            new = refresh_access_token_ms(rt)
+            new = await refresh_access_token_ms(rt)
     except Exception as e:
         raise RuntimeError(f"refresh_failed: {e}")
 
@@ -145,13 +149,14 @@ def get_valid_token(row):
     if "refresh_token" in new and new["refresh_token"]:
         updates["refresh_token"] = new["refresh_token"]
 
-    supabase.table("email_tokens").update(updates).eq("id", row["id"]).execute()
+    await supabase.table("email_tokens").update(updates).eq("id", row["id"]).execute()
     return new["access_token"]
 
-def _fetch_gmail_address(access_token: str) -> str | None:
+async def _fetch_gmail_address(access_token: str) -> str | None:
     """Haalt primair Gmail-adres op (scope: gmail.readonly of gmail.metadata)."""
     try:
-        r = requests.get(f"{GMAIL_API}/profile", headers={"Authorization": f"Bearer {access_token}"}, timeout=10)
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{GMAIL_API}/profile", headers={"Authorization": f"Bearer {access_token}"})
         if r.status_code == 200:
             return r.json().get("emailAddress")
     except Exception:
@@ -160,7 +165,7 @@ def _fetch_gmail_address(access_token: str) -> str | None:
 
 # ---------- Gmail: OAuth + helpers ----------
 @router.post("/oauth/gmail/initiate")
-def initiate_oauth_gmail(request: OAuthInitiateRequest):
+async def initiate_oauth_gmail(request: OAuthInitiateRequest):
     try:
         scope = urllib.parse.quote("https://www.googleapis.com/auth/gmail.readonly")
         auth_url = (
@@ -178,19 +183,19 @@ def initiate_oauth_gmail(request: OAuthInitiateRequest):
         return JSONResponse(status_code=500, content={"error": "Failed to initiate OAuth", "detail": str(e)})
 
 @router.get("/oauth/gmail/status/{user_id}")
-def get_gmail_status(user_id: str):
+async def get_gmail_status(user_id: str):
     try:
-        result = supabase.table("email_tokens").select("*").eq("user_id", user_id).eq("provider", "gmail").execute()
+        result = await supabase.table("email_tokens").select("*").eq("user_id", user_id).eq("provider", "gmail").execute()
         connected_accounts: List[Dict] = []
         for row in result.data:
             # Lazy backfill van email als nog leeg
             email = row.get("email")
             if not email and row.get("access_token"):
                 try:
-                    token = get_valid_token(row)
-                    email = _fetch_gmail_address(token)
+                    token = await get_valid_token(row)
+                    email = await _fetch_gmail_address(token)
                     if email:
-                        supabase.table("email_tokens").update({"email": email}).eq("id", row["id"]).execute()
+                        await supabase.table("email_tokens").update({"email": email}).eq("id", row["id"]).execute()
                 except Exception:
                     pass
 
@@ -211,7 +216,7 @@ def get_gmail_status(user_id: str):
         return JSONResponse(status_code=500, content={"error": "Failed to get Gmail status", "detail": str(e)})
 
 @router.get("/oauth/gmail/callback")
-def gmail_oauth_callback(code: str, state: str):
+async def gmail_oauth_callback(code: str, state: str):
     try:
         token_endpoint = "https://oauth2.googleapis.com/token"
         data = {
@@ -221,7 +226,8 @@ def gmail_oauth_callback(code: str, state: str):
             "redirect_uri": GOOGLE_REDIRECT_URI,
             "grant_type": "authorization_code"
         }
-        res = requests.post(token_endpoint, data=data, timeout=20)
+        async with httpx.AsyncClient(timeout=20) as client:
+            res = await client.post(token_endpoint, data=data)
         if res.status_code != 200:
             return RedirectResponse(url=f"{FRONTEND_URL}?gmail_connected=false")
 
@@ -229,10 +235,10 @@ def gmail_oauth_callback(code: str, state: str):
         access_token = token_data["access_token"]
 
         # E-mailadres ophalen en opslaan
-        email_addr = _fetch_gmail_address(access_token)
+        email_addr = await _fetch_gmail_address(access_token)
 
         expires_at = datetime.datetime.utcnow() + datetime.timedelta(seconds=token_data.get("expires_in", 3600))
-        supabase.table("email_tokens").insert({
+        await supabase.table("email_tokens").insert({
             "user_id": state,
             "provider": "gmail",
             "access_token": access_token,
@@ -245,7 +251,7 @@ def gmail_oauth_callback(code: str, state: str):
     except Exception:
         return RedirectResponse(url=f"{FRONTEND_URL}?gmail_connected=false")
 
-def fetch_new_message_ids_gmail(access_token: str, after_ts_ms: int | None, subject: str | None = None) -> list[str]:
+async def fetch_new_message_ids_gmail(access_token: str, after_ts_ms: int | None, subject: str | None = None) -> list[str]:
     headers = {"Authorization": f"Bearer {access_token}"}
     params = {"maxResults": 50}
     q_parts = []
@@ -257,22 +263,24 @@ def fetch_new_message_ids_gmail(access_token: str, after_ts_ms: int | None, subj
     if q_parts:
         params["q"] = " ".join(q_parts)
 
-    r = requests.get(f"{GMAIL_API}/messages", headers=headers, params=params, timeout=20)
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(f"{GMAIL_API}/messages", headers=headers, params=params)
     if r.status_code == 200:
         return [m["id"] for m in r.json().get("messages", [])]
     return []
 
-def fetch_message_gmail(access_token: str, msg_id: str) -> dict:
+async def fetch_message_gmail(access_token: str, msg_id: str) -> dict:
     headers = {"Authorization": f"Bearer {access_token}"}
-    r = requests.get(f"{GMAIL_API}/messages/{msg_id}", headers=headers, params={"format": "full"}, timeout=30)
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"{GMAIL_API}/messages/{msg_id}", headers=headers, params={"format": "full"})
     r.raise_for_status()
     return r.json()
 
 # ---------- Gmail Poll ----------
 @router.post("/gmail/poll")
-def gmail_poll():
+async def gmail_poll():
     try:
-        rows = supabase.table("email_tokens").select("*").eq("provider", "gmail").execute().data
+        rows = (await supabase.table("email_tokens").select("*").eq("provider", "gmail").execute()).data
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": "supabase_select_failed", "detail": str(e)})
 
@@ -281,32 +289,32 @@ def gmail_poll():
         user_id = row["user_id"]
         try:
             last_ts_ms = row.get("last_sync_ts")
-            token = get_valid_token(row)  # kan RuntimeError gooien
+            token = await get_valid_token(row)  # kan RuntimeError gooien
         except Exception:
             # kapotte/ontbrekende refresh_token of refresh-fout → sla account over
             continue
 
         subject_filter = row.get("subject_filter")
-        msg_ids = fetch_new_message_ids_gmail(token, last_ts_ms, subject=subject_filter)
+        msg_ids = await fetch_new_message_ids_gmail(token, last_ts_ms, subject=subject_filter)
         max_internal_ms = last_ts_ms or 0
 
         for msg_id in msg_ids:
-            if already_seen(user_id, msg_id):
+            if await already_seen(user_id, msg_id):
                 continue
             try:
-                msg = fetch_message_gmail(token, msg_id)
+                msg = await fetch_message_gmail(token, msg_id)
                 internal_ms = int(msg.get("internalDate", "0"))
                 if internal_ms > max_internal_ms:
                     max_internal_ms = internal_ms
-                push_to_n8n(user_id, msg, "gmail")
-                mark_seen(user_id, msg_id)
+                await push_to_n8n(user_id, msg, "gmail")
+                await mark_seen(user_id, msg_id)
                 processed += 1
             except Exception:
                 # sla individuele message-error over
                 pass
 
         if max_internal_ms:
-            supabase.table("email_tokens").update({"last_sync_ts": max_internal_ms}).eq("id", row["id"]).execute()
+            await supabase.table("email_tokens").update({"last_sync_ts": max_internal_ms}).eq("id", row["id"]).execute()
 
     return {"status": "ok", "processed": processed}
 
@@ -330,15 +338,16 @@ def _find_part_info(part: dict, attachment_id: str):
     return None, None
 
 @router.get("/gmail/attachment")
-def gmail_get_attachment(user_id: str, message_id: str, attachment_id: str):
-    rows = supabase.table("email_tokens").select("*").eq("provider", "gmail").eq("user_id", user_id).execute().data
+async def gmail_get_attachment(user_id: str, message_id: str, attachment_id: str):
+    rows = (await supabase.table("email_tokens").select("*").eq("provider", "gmail").eq("user_id", user_id).execute()).data
     if not rows:
         return JSONResponse(status_code=404, content={"error": "user not found"})
     row = rows[0]
-    token = get_valid_token(row)
+    token = await get_valid_token(row)
     headers = {"Authorization": f"Bearer {token}"}
 
-    msg = requests.get(f"{GMAIL_API}/messages/{message_id}", headers=headers, params={"format": "full"}, timeout=30)
+    async with httpx.AsyncClient(timeout=30) as client:
+        msg = await client.get(f"{GMAIL_API}/messages/{message_id}", headers=headers, params={"format": "full"})
     if msg.status_code != 200:
         return JSONResponse(status_code=400, content={"error": "failed to fetch message", "detail": msg.text})
     filename, mimetype = _find_part_info((msg.json().get("payload") or {}), attachment_id)
@@ -347,7 +356,8 @@ def gmail_get_attachment(user_id: str, message_id: str, attachment_id: str):
     if not mimetype:
         mimetype = "application/octet-stream"
 
-    r = requests.get(f"{GMAIL_API}/messages/{message_id}/attachments/{attachment_id}", headers=headers, timeout=30)
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"{GMAIL_API}/messages/{message_id}/attachments/{attachment_id}", headers=headers)
     if r.status_code != 200:
         return JSONResponse(status_code=400, content={"error": "failed to fetch attachment", "detail": r.text})
     payload = r.json()
@@ -358,7 +368,7 @@ def gmail_get_attachment(user_id: str, message_id: str, attachment_id: str):
 
 # ---------- OUTLOOK / MICROSOFT GRAPH ----------
 @router.post("/oauth/outlook/initiate")
-def initiate_oauth_outlook(request: OAuthInitiateRequest):
+async def initiate_oauth_outlook(request: OAuthInitiateRequest):
     try:
         state = request.user_id
         params = {
@@ -375,9 +385,9 @@ def initiate_oauth_outlook(request: OAuthInitiateRequest):
         return JSONResponse(status_code=500, content={"error": "Failed to initiate Outlook OAuth", "detail": str(e)})
 
 @router.get("/oauth/outlook/status/{user_id}")
-def get_outlook_status(user_id: str):
+async def get_outlook_status(user_id: str):
     try:
-        result = supabase.table("email_tokens").select("*").eq("user_id", user_id).eq("provider", "outlook").execute()
+        result = await supabase.table("email_tokens").select("*").eq("user_id", user_id).eq("provider", "outlook").execute()
         connected_accounts = []
         for row in result.data:
             now = int(time.time())
@@ -395,7 +405,7 @@ def get_outlook_status(user_id: str):
         return JSONResponse(status_code=500, content={"error": "Failed to get Outlook status", "detail": str(e)})
 
 @router.get("/oauth/outlook/callback")
-def outlook_oauth_callback(code: str, state: str):
+async def outlook_oauth_callback(code: str, state: str):
     try:
         data = {
             "client_id": MS_CLIENT_ID,
@@ -404,13 +414,14 @@ def outlook_oauth_callback(code: str, state: str):
             "code": code,
             "redirect_uri": MS_REDIRECT_URI,
         }
-        res = requests.post(TOKEN_URL_MS, data=data, timeout=30)
+        async with httpx.AsyncClient(timeout=30) as client:
+            res = await client.post(TOKEN_URL_MS, data=data)
         if res.status_code != 200:
             return RedirectResponse(url=f"{FRONTEND_URL}?outlook_connected=false")
 
         token_data = res.json()
         expires_at = datetime.datetime.utcnow() + datetime.timedelta(seconds=token_data.get("expires_in", 3600))
-        supabase.table("email_tokens").insert({
+        await supabase.table("email_tokens").insert({
             "user_id": state,
             "provider": "outlook",
             "access_token": token_data["access_token"],
@@ -422,7 +433,7 @@ def outlook_oauth_callback(code: str, state: str):
     except Exception:
         return RedirectResponse(url=f"{FRONTEND_URL}?outlook_connected=false")
 
-def fetch_new_message_ids_outlook(access_token: str, after_ts_ms: int | None) -> list[str]:
+async def fetch_new_message_ids_outlook(access_token: str, after_ts_ms: int | None) -> list[str]:
     headers = {"Authorization": f"Bearer {access_token}"}
     base = f"{GRAPH_BASE}/me/mailFolders/Inbox/messages"
     params = {"$top": 50, "$select": "id,receivedDateTime", "$orderby": "receivedDateTime asc"}
@@ -430,48 +441,50 @@ def fetch_new_message_ids_outlook(access_token: str, after_ts_ms: int | None) ->
         iso = _epoch_ms_to_iso_utc(after_ts_ms)
         params["$filter"] = f"receivedDateTime gt {iso}"
 
-    r = requests.get(base, headers=headers, params=params, timeout=30)
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(base, headers=headers, params=params)
     if r.status_code != 200:
         return []
     items = r.json().get("value", [])
     return [m["id"] for m in items]
 
-def fetch_message_outlook(access_token: str, msg_id: str) -> dict:
+async def fetch_message_outlook(access_token: str, msg_id: str) -> dict:
     headers = {"Authorization": f"Bearer {access_token}"}
     url = f"{GRAPH_BASE}/me/messages/{msg_id}"
     params = {"$expand": "attachments"}
-    r = requests.get(url, headers=headers, params=params, timeout=30)
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(url, headers=headers, params=params)
     r.raise_for_status()
     return r.json()
 
 @router.post("/outlook/poll")
-def outlook_poll():
-    rows = supabase.table("email_tokens").select("*").eq("provider", "outlook").execute().data
+async def outlook_poll():
+    rows = (await supabase.table("email_tokens").select("*").eq("provider", "outlook").execute()).data
     processed = 0
     for row in rows:
         user_id = row["user_id"]
         last_ts_ms = row.get("last_sync_ts")
         try:
-            token = get_valid_token(row)
+            token = await get_valid_token(row)
         except Exception:
             continue
 
-        msg_ids = fetch_new_message_ids_outlook(token, last_ts_ms)
+        msg_ids = await fetch_new_message_ids_outlook(token, last_ts_ms)
         max_recv_ms = last_ts_ms or 0
         for msg_id in msg_ids:
-            if already_seen(user_id, msg_id):
+            if await already_seen(user_id, msg_id):
                 continue
             try:
-                msg = fetch_message_outlook(token, msg_id)
+                msg = await fetch_message_outlook(token, msg_id)
                 rdt = msg.get("receivedDateTime")
                 recv_ms = int(datetime.datetime.fromisoformat(rdt.replace("Z","+00:00")).timestamp() * 1000) if rdt else 0
                 if recv_ms > max_recv_ms:
                     max_recv_ms = recv_ms
-                push_to_n8n(user_id, msg, "outlook")
-                mark_seen(user_id, msg_id)
+                await push_to_n8n(user_id, msg, "outlook")
+                await mark_seen(user_id, msg_id)
                 processed += 1
             except Exception:
                 pass
         if max_recv_ms:
-            supabase.table("email_tokens").update({"last_sync_ts": max_recv_ms}).eq("id", row["id"]).execute()
+            await supabase.table("email_tokens").update({"last_sync_ts": max_recv_ms}).eq("id", row["id"]).execute()
     return {"status": "ok", "processed": processed}
