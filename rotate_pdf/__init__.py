@@ -8,10 +8,11 @@ import logging
 import io
 import time
 import gc
+from utils.logging import get_logger
+from utils.uploads import read_upload_file
 
 router = APIRouter()
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 def detect_rotation_angle(image: Image.Image) -> int:
     try:
@@ -31,10 +32,7 @@ async def rotate_pdf(file: UploadFile = File(...)):
     start_time = time.perf_counter()
 
     try:
-        contents = await file.read()
-        logger.info(
-            f"PDF ontvangen: {file.filename} ({len(contents)/1024/1024:.2f} MB)"
-        )
+        contents = await read_upload_file(file, logger)
 
         images = convert_from_bytes(contents, dpi=150)
         output_buffer = io.BytesIO()

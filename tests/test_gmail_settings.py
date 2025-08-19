@@ -7,6 +7,12 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 os.environ.setdefault("SUPABASE_URL", "http://localhost")
 os.environ.setdefault("SUPABASE_KEY", "dummy")
+os.environ.setdefault("GOOGLE_CLIENT_ID", "dummy")
+os.environ.setdefault("GOOGLE_CLIENT_SECRET", "dummy")
+os.environ.setdefault("GOOGLE_REDIRECT_URI", "http://localhost")
+os.environ.setdefault("MS_CLIENT_ID", "dummy")
+os.environ.setdefault("MS_CLIENT_SECRET", "dummy")
+os.environ.setdefault("MS_REDIRECT_URI", "http://localhost")
 
 import gmail_oauth
 from gmail_oauth import router

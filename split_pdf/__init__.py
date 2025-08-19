@@ -9,11 +9,12 @@ import PyPDF2
 import time
 import logging
 import gc
+from utils.logging import get_logger
+from utils.uploads import read_upload_file
 
 Image.MAX_IMAGE_PIXELS = None
 router = APIRouter()
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 def extract_text(image: Image.Image):
     return pytesseract.image_to_string(image)
@@ -35,8 +36,7 @@ async def split_pdf(
         raise HTTPException(status_code=400, detail="Kies één splitsoptie.")
 
     start = time.perf_counter()
-    contents = await file.read()
-    logger.info(f"PDF ontvangen: {file.filename} ({len(contents)/1024/1024:.2f} MB)")
+    contents = await read_upload_file(file, logger)
 
     reader = PyPDF2.PdfReader(BytesIO(contents))
     total_pages = len(reader.pages)
