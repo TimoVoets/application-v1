@@ -5,7 +5,6 @@ from pdf2image import convert_from_bytes
 from PIL import Image, ImageOps
 import numpy as np
 import cv2
-import logging
 import gc
 from utils.logging import get_logger
 from utils.uploads import read_upload_file

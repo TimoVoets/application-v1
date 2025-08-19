@@ -18,7 +18,6 @@ from supabase import create_client
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import Optional, List, Dict
-import logging
 from utils.logging import get_logger
 
 load_dotenv()

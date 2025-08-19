@@ -4,7 +4,6 @@ from pdf2image.exceptions import PDFInfoNotInstalledError, PDFPageCountError, PD
 from PIL import Image
 from pytesseract import TesseractError
 import pytesseract
-import logging
 import io
 import time
 import gc
