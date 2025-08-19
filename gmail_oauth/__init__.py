@@ -5,9 +5,12 @@ from supabase import create_client
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import Optional, List, Dict
+import logging
 
 load_dotenv()
 router = APIRouter()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # === Config uit .env ===
 # Gmail
@@ -82,9 +85,13 @@ def push_to_n8n(user_id: str, message: dict, provider: str):
     if not N8N_WEBHOOK_URL:
         return
     try:
-        requests.post(N8N_WEBHOOK_URL, json={"user_id": user_id, "provider": provider, "message": message}, timeout=20)
-    except Exception:
-        pass
+        requests.post(
+            N8N_WEBHOOK_URL,
+            json={"user_id": user_id, "provider": provider, "message": message},
+            timeout=20,
+        )
+    except requests.RequestException as e:
+        logger.error("Failed to push to n8n", exc_info=e)
 
 def refresh_access_token_google(refresh_token: str) -> dict:
     data = {
@@ -134,7 +141,7 @@ def get_valid_token(row):
             new = refresh_access_token_google(rt)
         else:
             new = refresh_access_token_ms(rt)
-    except Exception as e:
+    except (requests.RequestException, RuntimeError) as e:
         raise RuntimeError(f"refresh_failed: {e}")
 
     new_expires = datetime.datetime.utcnow() + datetime.timedelta(seconds=new.get("expires_in", 3600))
@@ -151,31 +158,32 @@ def get_valid_token(row):
 def _fetch_gmail_address(access_token: str) -> str | None:
     """Haalt primair Gmail-adres op (scope: gmail.readonly of gmail.metadata)."""
     try:
-        r = requests.get(f"{GMAIL_API}/profile", headers={"Authorization": f"Bearer {access_token}"}, timeout=10)
+        r = requests.get(
+            f"{GMAIL_API}/profile",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
         if r.status_code == 200:
             return r.json().get("emailAddress")
-    except Exception:
-        pass
+    except requests.RequestException as e:
+        logger.error("Failed to fetch Gmail address", exc_info=e)
     return None
 
 # ---------- Gmail: OAuth + helpers ----------
 @router.post("/oauth/gmail/initiate")
 def initiate_oauth_gmail(request: OAuthInitiateRequest):
-    try:
-        scope = urllib.parse.quote("https://www.googleapis.com/auth/gmail.readonly")
-        auth_url = (
-            "https://accounts.google.com/o/oauth2/v2/auth?"
-            f"client_id={GOOGLE_CLIENT_ID}"
-            f"&redirect_uri={urllib.parse.quote(GOOGLE_REDIRECT_URI, safe='')}"
-            f"&response_type=code"
-            f"&scope={scope}"
-            f"&access_type=offline"
-            f"&state={request.user_id}"
-            f"&prompt=consent"
-        )
-        return JSONResponse(content={"auth_url": auth_url})
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": "Failed to initiate OAuth", "detail": str(e)})
+    scope = urllib.parse.quote("https://www.googleapis.com/auth/gmail.readonly")
+    auth_url = (
+        "https://accounts.google.com/o/oauth2/v2/auth?"
+        f"client_id={GOOGLE_CLIENT_ID}"
+        f"&redirect_uri={urllib.parse.quote(GOOGLE_REDIRECT_URI, safe='')}"
+        f"&response_type=code"
+        f"&scope={scope}"
+        f"&access_type=offline"
+        f"&state={request.user_id}"
+        f"&prompt=consent"
+    )
+    return JSONResponse(content={"auth_url": auth_url})
 
 @router.get("/oauth/gmail/status/{user_id}")
 def get_gmail_status(user_id: str):
@@ -191,8 +199,8 @@ def get_gmail_status(user_id: str):
                     email = _fetch_gmail_address(token)
                     if email:
                         supabase.table("email_tokens").update({"email": email}).eq("id", row["id"]).execute()
-                except Exception:
-                    pass
+                except RuntimeError as e:
+                    logger.error("Failed to backfill Gmail address", exc_info=e)
 
             now = int(time.time())
             expires_at_epoch = _to_epoch_seconds(row.get("expires_at"))
@@ -208,6 +216,7 @@ def get_gmail_status(user_id: str):
             })
         return {"connected": len(connected_accounts) > 0, "accounts": connected_accounts}
     except Exception as e:
+        logger.exception("Failed to get Gmail status", exc_info=e)
         return JSONResponse(status_code=500, content={"error": "Failed to get Gmail status", "detail": str(e)})
 
 @router.get("/oauth/gmail/callback")
@@ -219,7 +228,7 @@ def gmail_oauth_callback(code: str, state: str):
             "client_id": GOOGLE_CLIENT_ID,
             "client_secret": GOOGLE_CLIENT_SECRET,
             "redirect_uri": GOOGLE_REDIRECT_URI,
-            "grant_type": "authorization_code"
+            "grant_type": "authorization_code",
         }
         res = requests.post(token_endpoint, data=data, timeout=20)
         if res.status_code != 200:
@@ -228,22 +237,28 @@ def gmail_oauth_callback(code: str, state: str):
         token_data = res.json()
         access_token = token_data["access_token"]
 
-        # E-mailadres ophalen en opslaan
         email_addr = _fetch_gmail_address(access_token)
 
-        expires_at = datetime.datetime.utcnow() + datetime.timedelta(seconds=token_data.get("expires_in", 3600))
-        supabase.table("email_tokens").insert({
-            "user_id": state,
-            "provider": "gmail",
-            "access_token": access_token,
-            "refresh_token": token_data.get("refresh_token"),
-            "expires_at": expires_at.isoformat(),
-            "last_sync_ts": None,
-            "email": email_addr,
-        }).execute()
+        expires_at = datetime.datetime.utcnow() + datetime.timedelta(
+            seconds=token_data.get("expires_in", 3600)
+        )
+        supabase.table("email_tokens").insert(
+            {
+                "user_id": state,
+                "provider": "gmail",
+                "access_token": access_token,
+                "refresh_token": token_data.get("refresh_token"),
+                "expires_at": expires_at.isoformat(),
+                "last_sync_ts": None,
+                "email": email_addr,
+            }
+        ).execute()
         return RedirectResponse(url=f"{FRONTEND_URL}?gmail_connected=true")
-    except Exception:
-        return RedirectResponse(url=f"{FRONTEND_URL}?gmail_connected=false")
+    except requests.RequestException as e:
+        logger.error("Gmail OAuth token exchange failed", exc_info=e)
+    except Exception as e:
+        logger.exception("Failed to store Gmail token", exc_info=e)
+    return RedirectResponse(url=f"{FRONTEND_URL}?gmail_connected=false")
 
 def fetch_new_message_ids_gmail(access_token: str, after_ts_ms: int | None, subject: str | None = None) -> list[str]:
     headers = {"Authorization": f"Bearer {access_token}"}
@@ -274,6 +289,7 @@ def gmail_poll():
     try:
         rows = supabase.table("email_tokens").select("*").eq("provider", "gmail").execute().data
     except Exception as e:
+        logger.exception("Failed to fetch Gmail tokens", exc_info=e)
         return JSONResponse(status_code=500, content={"error": "supabase_select_failed", "detail": str(e)})
 
     processed = 0
@@ -282,7 +298,8 @@ def gmail_poll():
         try:
             last_ts_ms = row.get("last_sync_ts")
             token = get_valid_token(row)  # kan RuntimeError gooien
-        except Exception:
+        except RuntimeError as e:
+            logger.error("Token refresh failed", exc_info=e)
             # kapotte/ontbrekende refresh_token of refresh-fout → sla account over
             continue
 
@@ -301,9 +318,8 @@ def gmail_poll():
                 push_to_n8n(user_id, msg, "gmail")
                 mark_seen(user_id, msg_id)
                 processed += 1
-            except Exception:
-                # sla individuele message-error over
-                pass
+            except requests.RequestException as e:
+                logger.error("Failed to fetch Gmail message", exc_info=e)
 
         if max_internal_ms:
             supabase.table("email_tokens").update({"last_sync_ts": max_internal_ms}).eq("id", row["id"]).execute()
@@ -359,20 +375,17 @@ def gmail_get_attachment(user_id: str, message_id: str, attachment_id: str):
 # ---------- OUTLOOK / MICROSOFT GRAPH ----------
 @router.post("/oauth/outlook/initiate")
 def initiate_oauth_outlook(request: OAuthInitiateRequest):
-    try:
-        state = request.user_id
-        params = {
-            "client_id": MS_CLIENT_ID,
-            "response_type": "code",
-            "redirect_uri": MS_REDIRECT_URI,
-            "response_mode": "query",
-            "scope": MS_SCOPES,
-            "state": state,
-        }
-        url = AUTH_URL_MS + "?" + urllib.parse.urlencode(params)
-        return JSONResponse(content={"auth_url": url})
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": "Failed to initiate Outlook OAuth", "detail": str(e)})
+    state = request.user_id
+    params = {
+        "client_id": MS_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": MS_REDIRECT_URI,
+        "response_mode": "query",
+        "scope": MS_SCOPES,
+        "state": state,
+    }
+    url = AUTH_URL_MS + "?" + urllib.parse.urlencode(params)
+    return JSONResponse(content={"auth_url": url})
 
 @router.get("/oauth/outlook/status/{user_id}")
 def get_outlook_status(user_id: str):
@@ -392,6 +405,7 @@ def get_outlook_status(user_id: str):
             })
         return {"connected": len(connected_accounts) > 0, "accounts": connected_accounts}
     except Exception as e:
+        logger.exception("Failed to get Outlook status", exc_info=e)
         return JSONResponse(status_code=500, content={"error": "Failed to get Outlook status", "detail": str(e)})
 
 @router.get("/oauth/outlook/callback")
@@ -409,18 +423,25 @@ def outlook_oauth_callback(code: str, state: str):
             return RedirectResponse(url=f"{FRONTEND_URL}?outlook_connected=false")
 
         token_data = res.json()
-        expires_at = datetime.datetime.utcnow() + datetime.timedelta(seconds=token_data.get("expires_in", 3600))
-        supabase.table("email_tokens").insert({
-            "user_id": state,
-            "provider": "outlook",
-            "access_token": token_data["access_token"],
-            "refresh_token": token_data.get("refresh_token"),
-            "expires_at": expires_at.isoformat(),
-            "last_sync_ts": None
-        }).execute()
+        expires_at = datetime.datetime.utcnow() + datetime.timedelta(
+            seconds=token_data.get("expires_in", 3600)
+        )
+        supabase.table("email_tokens").insert(
+            {
+                "user_id": state,
+                "provider": "outlook",
+                "access_token": token_data["access_token"],
+                "refresh_token": token_data.get("refresh_token"),
+                "expires_at": expires_at.isoformat(),
+                "last_sync_ts": None,
+            }
+        ).execute()
         return RedirectResponse(url=f"{FRONTEND_URL}?outlook_connected=true")
-    except Exception:
-        return RedirectResponse(url=f"{FRONTEND_URL}?outlook_connected=false")
+    except requests.RequestException as e:
+        logger.error("Outlook OAuth token exchange failed", exc_info=e)
+    except Exception as e:
+        logger.exception("Failed to store Outlook token", exc_info=e)
+    return RedirectResponse(url=f"{FRONTEND_URL}?outlook_connected=false")
 
 def fetch_new_message_ids_outlook(access_token: str, after_ts_ms: int | None) -> list[str]:
     headers = {"Authorization": f"Bearer {access_token}"}
@@ -453,7 +474,8 @@ def outlook_poll():
         last_ts_ms = row.get("last_sync_ts")
         try:
             token = get_valid_token(row)
-        except Exception:
+        except RuntimeError as e:
+            logger.error("Token refresh failed", exc_info=e)
             continue
 
         msg_ids = fetch_new_message_ids_outlook(token, last_ts_ms)
@@ -464,14 +486,16 @@ def outlook_poll():
             try:
                 msg = fetch_message_outlook(token, msg_id)
                 rdt = msg.get("receivedDateTime")
-                recv_ms = int(datetime.datetime.fromisoformat(rdt.replace("Z","+00:00")).timestamp() * 1000) if rdt else 0
+                recv_ms = int(
+                    datetime.datetime.fromisoformat(rdt.replace("Z", "+00:00")).timestamp() * 1000
+                ) if rdt else 0
                 if recv_ms > max_recv_ms:
                     max_recv_ms = recv_ms
                 push_to_n8n(user_id, msg, "outlook")
                 mark_seen(user_id, msg_id)
                 processed += 1
-            except Exception:
-                pass
+            except requests.RequestException as e:
+                logger.error("Failed to fetch Outlook message", exc_info=e)
         if max_recv_ms:
             supabase.table("email_tokens").update({"last_sync_ts": max_recv_ms}).eq("id", row["id"]).execute()
     return {"status": "ok", "processed": processed}
