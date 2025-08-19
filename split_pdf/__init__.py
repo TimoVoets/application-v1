@@ -12,7 +12,6 @@ import gc
 
 Image.MAX_IMAGE_PIXELS = None
 router = APIRouter()
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def extract_text(image: Image.Image):

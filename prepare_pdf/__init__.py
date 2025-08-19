@@ -9,7 +9,6 @@ import logging
 import gc
 
 router = APIRouter()
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = None
 

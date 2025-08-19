@@ -45,7 +45,6 @@ def validate_env() -> None:
 validate_env()
 
 router = APIRouter()
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # === Config uit .env ===

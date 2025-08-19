@@ -13,7 +13,10 @@ from gmail_oauth import router as email_router, validate_env  # jouw OAuth/route
 
 validate_env()
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()

@@ -10,7 +10,6 @@ import time
 import gc
 
 router = APIRouter()
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def detect_rotation_angle(image: Image.Image) -> int:
