@@ -1,3 +1,16 @@
+"""OAuth helpers for Gmail and Outlook.
+
+Required environment variables:
+- ``GOOGLE_CLIENT_ID``
+- ``GOOGLE_CLIENT_SECRET``
+- ``GOOGLE_REDIRECT_URI``
+- ``MS_CLIENT_ID``
+- ``MS_CLIENT_SECRET``
+- ``MS_REDIRECT_URI``
+- ``SUPABASE_URL``
+- ``SUPABASE_KEY``
+"""
+
 from fastapi import APIRouter
 from fastapi.responses import RedirectResponse, JSONResponse, StreamingResponse
 import os, requests, datetime, time, re, base64, io, urllib.parse
@@ -7,6 +20,29 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict
 
 load_dotenv()
+
+
+def validate_env() -> None:
+    """Validate presence of required environment variables."""
+    required_keys = [
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET",
+        "GOOGLE_REDIRECT_URI",
+        "MS_CLIENT_ID",
+        "MS_CLIENT_SECRET",
+        "MS_REDIRECT_URI",
+        "SUPABASE_URL",
+        "SUPABASE_KEY",
+    ]
+    missing = [k for k in required_keys if not os.getenv(k)]
+    if missing:
+        raise RuntimeError(
+            "Missing required environment variables: " + ", ".join(missing)
+        )
+
+
+validate_env()
+
 router = APIRouter()
 
 # === Config uit .env ===
