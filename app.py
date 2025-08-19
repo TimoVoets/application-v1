@@ -5,6 +5,7 @@ load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+from utils.logging import get_logger
 
 from rotate_pdf import router as rotate_router
 from split_pdf import router as split_router
@@ -13,8 +14,7 @@ from gmail_oauth import router as email_router, validate_env  # jouw OAuth/route
 
 validate_env()
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 app = FastAPI()
 
