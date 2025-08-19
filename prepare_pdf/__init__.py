@@ -7,10 +7,11 @@ import numpy as np
 import cv2
 import logging
 import gc
+from utils.logging import get_logger
+from utils.uploads import read_upload_file
 
 router = APIRouter()
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 Image.MAX_IMAGE_PIXELS = None
 
 def deskew(pil_image: Image.Image) -> Image.Image:
@@ -27,8 +28,7 @@ def deskew(pil_image: Image.Image) -> Image.Image:
 
 @router.post("/prepare")
 async def prepare_pdf(file: UploadFile = File(...)):
-    contents = await file.read()
-    logger.info(f"Ontvangen: {file.filename} ({len(contents)/1024/1024:.2f} MB)")
+    contents = await read_upload_file(file, logger, "Ontvangen")
 
     reader = PyPDF2.PdfReader(BytesIO(contents))
     if not reader.pages:
