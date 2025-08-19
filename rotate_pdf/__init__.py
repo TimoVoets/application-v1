@@ -1,6 +1,8 @@
 from fastapi import APIRouter, UploadFile, File, Response, HTTPException
 from pdf2image import convert_from_bytes
+from pdf2image.exceptions import PDFInfoNotInstalledError, PDFPageCountError, PDFSyntaxError
 from PIL import Image
+from pytesseract import TesseractError
 import pytesseract
 import logging
 import io
@@ -17,8 +19,8 @@ def detect_rotation_angle(image: Image.Image) -> int:
         for line in osd.splitlines():
             if "Rotate" in line:
                 return int(line.split(":")[1].strip())
-    except Exception as e:
-        logger.error(f"Fout bij rotatiedetectie: {e}")
+    except TesseractError as e:
+        logger.exception("Fout bij rotatiedetectie", exc_info=e)
     return 0
 
 def correct_image_rotation(pil_image: Image.Image, angle: int) -> Image.Image:
@@ -30,7 +32,9 @@ async def rotate_pdf(file: UploadFile = File(...)):
 
     try:
         contents = await file.read()
-        logger.info(f"PDF ontvangen: {file.filename} ({len(contents)/1024/1024:.2f} MB)")
+        logger.info(
+            f"PDF ontvangen: {file.filename} ({len(contents)/1024/1024:.2f} MB)"
+        )
 
         images = convert_from_bytes(contents, dpi=150)
         output_buffer = io.BytesIO()
@@ -62,6 +66,9 @@ async def rotate_pdf(file: UploadFile = File(...)):
             headers={"Content-Disposition": "attachment; filename=rotated_output.pdf"}
         )
 
-    except Exception as e:
-        logger.error(f"Fout: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except (PDFInfoNotInstalledError, PDFPageCountError, PDFSyntaxError) as e:
+        logger.error("PDF-verwerking mislukt", exc_info=e)
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("Onverwachte fout bij roteren van PDF")
+        raise HTTPException(status_code=500, detail="Internal server error")
