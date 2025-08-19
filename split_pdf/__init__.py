@@ -7,7 +7,6 @@ from PIL import Image
 from pyzbar.pyzbar import decode as decode_barcode
 import PyPDF2
 import time
-import logging
 import gc
 from utils.logging import get_logger
 from utils.uploads import read_upload_file
